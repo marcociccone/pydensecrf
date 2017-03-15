@@ -5,6 +5,11 @@ Adapted from the inference.py to demonstate the usage of the util functions.
 import sys
 import numpy as np
 import pydensecrf.densecrf as dcrf
+from dataset_loaders.images.cityscapes import CityscapesDataset as Dataset
+from skimage.color import label2rgb
+from pydensecrf.utils import (unary_from_labels,
+                              create_pairwise_bilateral,
+                              create_pairwise_gaussian)
 
 # Get im{read,write} from somewhere.
 try:
@@ -16,43 +21,52 @@ except ImportError:
     imwrite = imsave
     # TODO: Use scipy instead.
 
-from pydensecrf.utils import unary_from_labels, create_pairwise_bilateral, create_pairwise_gaussian
 
-if len(sys.argv) != 4:
-    print("Usage: python {} IMAGE ANNO OUTPUT".format(sys.argv[0]))
-    print("")
-    print("IMAGE and ANNO are inputs and OUTPUT is where the result should be written.")
-    sys.exit(1)
+# if len(sys.argv) != 4:
+#     print("Usage: python {} IMAGE ANNO OUTPUT".format(sys.argv[0]))
+#     print("")
+#     print("IMAGE and ANNO are inputs and OUTPUT is where the result should be written.")
+#     sys.exit(1)
 
-fn_im = sys.argv[1]
-fn_anno = sys.argv[2]
-fn_output = sys.argv[3]
+# fn_im = sys.argv[1]
+# fn_anno = sys.argv[2]
+# fn_output = sys.argv[3]
 
 ##################################
 ### Read images and annotation ###
 ##################################
-img = imread(fn_im)
 
-# Convert the annotation's RGB color to a single 32-bit integer color 0xBBGGRR
-anno_rgb = imread(fn_anno).astype(np.uint32)
-anno_lbl = anno_rgb[:,:,0] + (anno_rgb[:,:,1] << 8) + (anno_rgb[:,:,2] << 16)
+# img = imread(fn_im)
+# anno_rgb = imread(fn_anno).astype(np.uint32)
 
-# Convert the 32bit integer color to 1, 2, ... labels.
-# Note that all-black, i.e. the value 0 for background will stay 0.
-colors, labels = np.unique(anno_lbl, return_inverse=True)
+n_iter = 20
+fn_im = 'valid/f.png'
+fn_output = 'valid/f_out.png'
+total_img = imread(fn_im)
 
-# And create a mapping back from the labels to 32bit integer colors.
-# But remove the all-0 black, that won't exist in the MAP!
-colors = colors[1:]
-colorize = np.empty((len(colors), 3), np.uint8)
-colorize[:,0] = (colors & 0x0000FF)
-colorize[:,1] = (colors & 0x00FF00) >> 8
-colorize[:,2] = (colors & 0xFF0000) >> 16
+# Split image and prediction because are concatenated in the same file
+img = total_img[:, :2048, :].astype(np.uint8)
+anno_rgb = total_img[:, 4096:, :].astype(np.uint8)
+
+# Convert the annotation's RGB color to a label indeces
+# NOTE: we disregard the void class
+# Everything that is not in cmap is initialized as 0.
+# 0 stands for "unknown" or "unsure" as densecrf example do.
+
+cmap = Dataset.get_cmap()[:-1]
+cmap = (cmap*255).astype(np.uint8)
+anno_lbl = np.zeros(img.shape[:2]).astype(np.uint8)
+# Map back from RGB to label representation
+for map_key, map_value in enumerate(cmap, start=1):
+    mask = np.where((anno_rgb == np.asarray(map_value)).sum(-1) == 3)
+    anno_lbl[mask] = map_key
 
 # Compute the number of classes in the label image.
 # We subtract one because the number shouldn't include the value 0 which stands
 # for "unknown" or "unsure".
-n_labels = len(set(labels.flat)) - 1
+labels = anno_lbl
+n_labels = len(cmap)
+
 print(n_labels, " labels and \"unknown\" 0: ", set(labels.flat))
 
 ###########################
@@ -90,13 +104,13 @@ else:
     d.setUnaryEnergy(U)
 
     # This creates the color-independent features and then add them to the CRF
-    feats = create_pairwise_gaussian(sdims=(3, 3), shape=img.shape[:2])
+    feats = create_pairwise_gaussian(sdims=(10, 10), shape=img.shape[:2])
     d.addPairwiseEnergy(feats, compat=3,
                         kernel=dcrf.DIAG_KERNEL,
                         normalization=dcrf.NORMALIZE_SYMMETRIC)
 
     # This creates the color-dependent features and then add them to the CRF
-    feats = create_pairwise_bilateral(sdims=(80, 80), schan=(13, 13, 13),
+    feats = create_pairwise_bilateral(sdims=(200, 200), schan=(20, 20, 20),
                                       img=img, chdim=2)
     d.addPairwiseEnergy(feats, compat=10,
                         kernel=dcrf.DIAG_KERNEL,
@@ -108,17 +122,17 @@ else:
 ####################################
 
 # Run five inference steps.
-Q = d.inference(5)
+Q = d.inference(n_iter)
 
 # Find out the most probable class for each pixel.
 MAP = np.argmax(Q, axis=0)
 
 # Convert the MAP (labels) back to the corresponding colors and save the image.
-MAP = colorize[MAP,:]
+MAP = label2rgb(MAP, colors=cmap).astype(np.uint8)
 imsave(fn_output, MAP.reshape(img.shape))
 
-# Just randomly manually run inference iterations
-Q, tmp1, tmp2 = d.startInference()
-for i in range(5):
-    print("KL-divergence at {}: {}".format(i, d.klDivergence(Q)))
-    d.stepInference(Q, tmp1, tmp2)
+# # Just randomly manually run inference iterations
+# Q, tmp1, tmp2 = d.startInference()
+# for i in range(n_iter):
+#     print("KL-divergence at {}: {}".format(i, d.klDivergence(Q)))
+#     d.stepInference(Q, tmp1, tmp2)
